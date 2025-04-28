@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Side-Scrolling Shooter</title>
+  <style>
+    body { margin: 0; overflow: hidden; background: black; }
+    #ui {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: white;
+      font-size: 50px;
+      z-index: 10;
+    }
+    canvas {
+      display: block;
+      margin: auto;
+      background: black;
+      touch-action: none; /* prevent default gestures */
+    }
+    button { padding: 10px 20px; font-size: 50px; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="ui">
+    <span>생명: <b id="lives">2</b></span>
+    <span>에너지: <b id="energy">5</b></span>
+    <span>점수: <b id="score">0</b></span>
+    <span>스테이지: <b id="stage">1</b></span>
+    <button id="pauseBtn">일시정지</button>
+    <button id="bgmBtn">BGM On</button>
+  </div>
+  <script>
+    // Audio setup
+    const shootSound = new Audio('Game Shoot.wav'); shootSound.volume = 0.5;
+    let lastPlayerShot = 0;
+    const bgm = new Audio('LOOP.mp3'); bgm.loop = true; bgm.volume = 0.3;
+
+    // Canvas and context
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // Design resolution for consistent aspect ratio
+    const DESIGN_WIDTH = 1280;
+    const DESIGN_HEIGHT = 720;
+
+    function resize() {
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      const aspect = DESIGN_WIDTH / DESIGN_HEIGHT;
+      let cw, ch;
+      if (vw / vh > aspect) {
+        // window is wider
+        ch = vh;
+        cw = ch * aspect;
+      } else {
+        // window is taller
+        cw = vw;
+        ch = cw / aspect;
+      }
+      canvas.style.width = cw + 'px';
+      canvas.style.height = ch + 'px';
+      canvas.width = DESIGN_WIDTH;
+      canvas.height = DESIGN_HEIGHT;
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // Game constants
+    const PLAYER_SPEED = 5;
+    const INITIAL_BULLET_SPEED = 4;
+    const ENEMY_SPEED = 2;
+    const ENEMY_BULLET_SPEED = 4;
+    const ITEM_SPEED = 2;
+    const INITIAL_ENERGY = 5;
+    const BACKGROUND_SCROLL_SPEED = 1;
+    const MAX_STAGE = 10;
+    const AUTO_SHOOT_INTERVAL = 20;
+
+    // Game variables
+    let player, enemies = [], playerBullets = [], enemyBullets = [], items = [];
+    let lives = 2, energy = INITIAL_ENERGY, score = 0, item1Count = 0;
+    let bulletCount = 1, backgroundX = 0, stage = 1;
+    let paused = false;
+    let lifeScoreThreshold = 50;
+    let isBlinking = false, blinkStart = 0;
+    const keys = {};
+
+    // Mobile drag control
+    let dragging = false;
+    let dragOffsetX = 0, dragOffsetY = 0;
+
+    // Assets
+    const images = {};
+    const assetPaths = {
+      protagonist: 'protagonist.png',
+      enemy1: 'enemy1.png', enemy2: 'enemy2.png',
+      item1: 'item1.png', item2: 'item2.png',
+      background: 'background.png'
+    };
+    for (let k in assetPaths) { images[k] = new Image(); images[k].src = assetPaths[k]; }
+
+    // Classes
+    class Player {
+      constructor() {
+        this.img = images.protagonist;
+        this.w = 80;
+        this.h = 80;
+        this.x = DESIGN_WIDTH * 0.1;
+        this.y = DESIGN_HEIGHT / 2 - this.h / 2;
+      }
+      update() {
+        if (keys.ArrowUp && this.y > 0) this.y -= PLAYER_SPEED;
+        if (keys.ArrowDown && this.y + this.h < DESIGN_HEIGHT) this.y += PLAYER_SPEED;
+        if (keys.ArrowLeft && this.x > 0) this.x -= PLAYER_SPEED;
+        if (keys.ArrowRight && this.x + this.w < DESIGN_WIDTH) this.x += PLAYER_SPEED;
+      }
+      draw() {
+        if (this.img.complete) ctx.drawImage(this.img, this.x, this.y, this.w, this.h);
+      }
+      shoot() {
+        const now = Date.now();
+        if (now - lastPlayerShot < 180) return;
+        lastPlayerShot = now;
+        shootSound.currentTime = 0;
+        shootSound.play().catch(() => {});
+        const speed = INITIAL_BULLET_SPEED * Math.pow(2, item1Count);
+        // Single or multi bullets
+        if (bulletCount === 1) {
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2, dx: speed, dy: 0 });
+        } else if (bulletCount === 2) {
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2-4, dx: speed, dy: -2 });
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2+4, dx: speed, dy: 2 });
+        } else {
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2, dx: speed, dy: 0 });
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2-6, dx: speed, dy: -3 });
+          playerBullets.push({ x: this.x + this.w, y: this.y + this.h/2+6, dx: speed, dy: 3 });
+        }
+      }
+    }
+
+    class Enemy {
+      constructor() {
+        this.img = Math.random() < 0.5 ? images.enemy1 : images.enemy2;
+        this.w = 80;
+        this.h = 80;
+        this.health = this.img === images.enemy1 ? 2 : 5;
+        this.x = DESIGN_WIDTH;
+        this.y = Math.random() * (DESIGN_HEIGHT - this.h);
+        this.timer = 0;
+      }
+      update() {
+        this.x -= ENEMY_SPEED;
+        this.timer++;
+        if (this.timer > AUTO_SHOOT_INTERVAL * 4 - (stage - 1) * 2) {
+          enemyBullets.push({ x: this.x, y: this.y + this.h/2, dx: -ENEMY_BULLET_SPEED, dy: 0 });
+          this.timer = 0;
+        }
+      }
+      draw() {
+        if (this.img.complete) ctx.drawImage(this.img, this.x, this.y, this.w, this.h);
+      }
+    }
+
+    class Item {
+      constructor() {
+        this.type = Math.random() < 0.5 ? 'item1' : 'item2';
+        this.img = images[this.type];
+        this.w = 48;
+        this.h = 48;
+        this.x = DESIGN_WIDTH;
+        this.y = Math.random() * (DESIGN_HEIGHT - this.h);
+      }
+      update() { this.x -= ITEM_SPEED; }
+      draw() { if (this.img.complete) ctx.drawImage(this.img, this.x, this.y, this.w, this.h); }
+    }
+
+    function isColliding(a, b, bw = b.w, bh = b.h) {
+      return a.x < b.x + bw && a.x + 6 > b.x && a.y < b.y + bh && a.y + 6 > b.y;
+    }
+    function updateUI() {
+      document.getElementById('lives').textContent = lives;
+      document.getElementById('energy').textContent = energy;
+      document.getElementById('score').textContent = score;
+      document.getElementById('stage').textContent = stage;
+    }
+
+    function init() {
+      player = new Player();
+      // Pause and BGM buttons
+      const pauseBtn = document.getElementById('pauseBtn');
+      pauseBtn.addEventListener('click', () => {
+        paused = !paused;
+        pauseBtn.textContent = paused ? '재개' : '일시정지';
+        if (!paused) requestAnimationFrame(loop);
+      });
+      const bgmBtn = document.getElementById('bgmBtn');
+      bgmBtn.addEventListener('click', () => {
+        if (bgm.paused) { bgm.play().catch(() => {}); bgmBtn.textContent = 'BGM Off'; }
+        else { bgm.pause(); bgmBtn.textContent = 'BGM On'; }
+      });
+      window.addEventListener('click', function startBgm() {
+        bgm.play().catch(() => {});
+        window.removeEventListener('click', startBgm);
+      });
+      // Keyboard controls
+      window.addEventListener('keydown', e => { if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) keys[e.key] = true; });
+      window.addEventListener('keyup', e => { if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.key)) keys[e.key] = false; });
+      // Touch controls
+      canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+      canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+      canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+
+      requestAnimationFrame(loop);
+    }
+
+    function handleTouchStart(e) {
+      e.preventDefault();
+      for (const t of e.touches) {
+        const tx = t.clientX * (canvas.width / canvas.clientWidth);
+        const ty = t.clientY * (canvas.height / canvas.clientHeight);
+        if (t.clientX < canvas.clientWidth / 2) {
+          // start dragging if touching player
+          if (tx >= player.x && tx <= player.x + player.w && ty >= player.y && ty <= player.y + player.h) {
+            dragging = true;
+            dragOffsetX = tx - player.x;
+            dragOffsetY = ty - player.y;
+          }
+        } else {
+          // right side tap shoots
+          player.shoot();
+        }
+      }
+    }
+    function handleTouchMove(e) {
+      e.preventDefault();
+      if (!dragging) return;
+      const t = e.touches[0];
+      const tx = t.clientX * (canvas.width / canvas.clientWidth);
+      const ty = t.clientY * (canvas.height / canvas.clientHeight);
+      player.x = Math.max(0, Math.min(tx - dragOffsetX, DESIGN_WIDTH - player.w));
+      player.y = Math.max(0, Math.min(ty - dragOffsetY, DESIGN_HEIGHT - player.h));
+    }
+    function handleTouchEnd(e) {
+      e.preventDefault();
+      dragging = false;
+    }
+
+    // Main game loop
+    function loop() {
+      if (paused) return;
+      const now = Date.now();
+      // Background scroll
+      if (images.background.complete) {
+        backgroundX -= BACKGROUND_SCROLL_SPEED;
+        if (backgroundX <= -DESIGN_WIDTH) backgroundX = 0;
+        ctx.drawImage(images.background, backgroundX, 0, DESIGN_WIDTH, DESIGN_HEIGHT);
+        ctx.drawImage(images.background, backgroundX + DESIGN_WIDTH, 0, DESIGN_WIDTH, DESIGN_HEIGHT);
+      }
+      // Spawn enemies/items
+      if (Math.random() < (0.002 + (stage-1)*0.0005) * 2) enemies.push(new Enemy());
+      if (Math.random() < 0.001) items.push(new Item());
+      // Player blink on respawn
+      if (isBlinking && now - blinkStart >= 2000) isBlinking = false;
+      // Update/draw player
+      player.update();
+      if (!isBlinking || Math.floor((now-blinkStart)/200) % 2 === 0) player.draw();
+      // Auto-shoot
+      player.shoot();
+      // Bullets
+      ctx.fillStyle = 'white';
+      playerBullets.forEach((b,i) => { b.x += b.dx; b.y += b.dy; ctx.fillRect(b.x,b.y,6,6); if(b.x>DESIGN_WIDTH||b.y<0||b.y>DESIGN_HEIGHT) playerBullets.splice(i,1); });
+      ctx.fillStyle = 'red';
+      enemyBullets.forEach((b,i) => { b.x += b.dx; b.y += b.dy; ctx.fillRect(b.x,b.y,6,6); if(b.x+6<0) enemyBullets.splice(i,1); });
+      // Enemies & items
+      enemies.forEach((e,ei) => { e.update(); e.draw(); if(e.x+e.w<0) enemies.splice(ei,1); });
+      items.forEach((it,ii) => { it.update(); it.draw(); if(it.x+it.w<0) items.splice(ii,1); });
+      // Collision logic
+      playerBullets.forEach((b,bi) => {
+        enemies.forEach((e,ei) => {
+          if (isColliding(b,e)) {
+            e.health--;
+            playerBullets.splice(bi,1);
+            if (e.health <= 0) {
+              score += (e.img===images.enemy1 ? 2 : 5);
+              updateUI();
+              enemies.splice(ei,1);
+            }
+          }
+        });
+      });
+      enemyBullets.forEach((b,bi) => {
+        if (isColliding(b, player)) {
+          enemyBullets.splice(bi,1);
+          energy--; updateUI();
+          if (energy <= 0) {
+            lives--; updateUI();
+            if (lives>0) {
+              energy = INITIAL_ENERGY;
+              item1Count = 0; bulletCount = 1; // reset
+              player = new Player();
+              isBlinking = true; blinkStart = now;
+            } else {
+              alert('Game Over');
+              return location.reload();
+            }
+          }
+        }
+      });
+      items.forEach((it,ii) => {
+        if (isColliding(it, player, it.w, it.h)) {
+          if (it.type === 'item1' && item1Count < 2) {
+            item1Count++; bulletCount = item1Count + 1;
+          } else if (it.type === 'item2') {
+            energy = Math.min(energy+1, INITIAL_ENERGY);
+            updateUI();
+          }
+          items.splice(ii,1);
+        }
+      });
+      if (score >= lifeScoreThreshold) {
+        lives++; lifeScoreThreshold += 50; updateUI();
+      }
+      if (score >= 100) {
+        if (stage < MAX_STAGE) {
+          stage++; score = 0; updateUI(); alert(`Stage ${stage} 시작!`);
+        } else {
+          alert('모든 스테이지 클리어! 축하합니다!'); paused = true;
+        }
+      }
+      requestAnimationFrame(loop);
+    }
+
+    init();
+  </script>
+</body>
+</html>
